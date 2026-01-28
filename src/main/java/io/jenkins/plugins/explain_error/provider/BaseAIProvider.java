@@ -10,6 +10,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.verb.POST;
 
+import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.V;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
@@ -52,6 +53,17 @@ public abstract class BaseAIProvider extends AbstractDescribableImpl<BaseAIProvi
      * @throws ExplanationException if there's a communication error
      */
     public final String explainError(String errorLogs, TaskListener listener) throws ExplanationException {
+        return explainError(errorLogs, listener, null);
+    }
+
+    /**
+     * Explain error logs using the configured AI provider.
+     * @param errorLogs the error logs to explain
+     * @param language the preferred response language
+     * @return the AI explanation
+     * @throws ExplanationException if there's a communication error
+     */
+    public final String explainError(String errorLogs, TaskListener listener, String language) throws ExplanationException {
         Assistant assistant;
 
         if (StringUtils.isBlank(errorLogs)) {
@@ -68,8 +80,9 @@ public abstract class BaseAIProvider extends AbstractDescribableImpl<BaseAIProvi
             throw new ExplanationException("error", "Failed to create assistant", e);
         }
 
+        String responseLanguage = StringUtils.isBlank(language) ? "English" : language.trim();
         try {
-            return assistant.analyzeLogs(errorLogs).toString();
+            return assistant.analyzeLogs(errorLogs, responseLanguage).toString();
         } catch (Exception e) {
             LOGGER.severe("AI API request failed: " + e.getMessage());
             throw new ExplanationException("error", "API request failed: " + e.getMessage(), e);
@@ -82,16 +95,20 @@ public abstract class BaseAIProvider extends AbstractDescribableImpl<BaseAIProvi
     }
 
     public interface Assistant {
-        @UserMessage("""
+        @SystemMessage("""
             You are an expert Jenkins administrator and software engineer.
-            Please analyze the following Jenkins build error logs.
+            CRITICAL: You MUST respond ONLY in {{language}}. ALL text in your response must be in {{language}}.
+            This includes: error summaries, resolution steps, best practices, and any other text.
+            """)
+        @UserMessage("""
+            Analyze the following Jenkins build error logs and provide a clear, actionable explanation.
+            
+            IMPORTANT: Your ENTIRE response must be in {{language}}, including all field values.
 
             ERROR LOGS:
             {{errorLogs}}
-
-            Provide a clear, actionable explanation of what went wrong.
             """)
-        JenkinsLogAnalysis analyzeLogs(@V("errorLogs") String errorLogs);
+        JenkinsLogAnalysis analyzeLogs(@V("errorLogs") String errorLogs, @V("language") String language);
     }
 
     public String getProviderName() {
