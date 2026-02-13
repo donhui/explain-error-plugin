@@ -30,10 +30,14 @@ public class ErrorExplainer {
     }
 
     public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines) {
-        return explainError(run, listener, logPattern, maxLines, null);
+        return explainError(run, listener, logPattern, maxLines, null, null);
     }
 
     public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines, String language) {
+        return explainError(run, listener, logPattern, maxLines, language, null);
+    }
+
+    public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines, String language, String customContext) {
         String jobInfo = run != null ? ("[" + run.getParent().getFullName() + " #" + run.getNumber() + "]") : "[unknown]";
         try {
             // Check if explanation is enabled (folder-level or global)
@@ -52,9 +56,12 @@ public class ErrorExplainer {
             // Extract error logs
             String errorLogs = extractErrorLogs(run, logPattern, maxLines);
 
+            // Use step-level customContext if provided, otherwise fallback to global
+            String effectiveCustomContext = StringUtils.isNotBlank(customContext) ? customContext : GlobalConfigurationImpl.get().getCustomContext();
+
             // Get AI explanation
             try {
-                String explanation = provider.explainError(errorLogs, listener, language);
+                String explanation = provider.explainError(errorLogs, listener, language, effectiveCustomContext);
                 LOGGER.fine(jobInfo + " AI error explanation succeeded.");
 
                 // Store explanation in build action
@@ -115,10 +122,10 @@ public class ErrorExplainer {
             throw new ExplanationException("error", "No AI provider configured.");
         }
 
-        // Get AI explanation
-        String explanation = provider.explainError(errorText, new LogTaskListener(LOGGER, Level.FINE));
+        // Get AI explanation with global custom context
+        String explanation = provider.explainError(errorText, new LogTaskListener(LOGGER, Level.FINE), null, GlobalConfigurationImpl.get().getCustomContext());
         LOGGER.fine(jobInfo + " AI error explanation succeeded.");
-        LOGGER.finer("Explanation length: " + explanation.length());
+        LOGGER.fine("Explanation length: " + explanation.length());
         this.providerName = provider.getProviderName();
         ErrorExplanationAction action = new ErrorExplanationAction(explanation, url, errorText, provider.getProviderName());
         run.addOrReplaceAction(action);
