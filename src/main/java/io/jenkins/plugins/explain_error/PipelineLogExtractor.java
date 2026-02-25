@@ -14,13 +14,19 @@ import jenkins.model.Jenkins;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.logging.Logger;
 import java.util.List;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Utility for extracting log lines related to a failing build or pipeline step
@@ -41,6 +47,19 @@ public class PipelineLogExtractor {
 
     private static final Logger LOGGER = Logger.getLogger(PipelineLogExtractor.class.getName());
     public static final String URL_NAME = "stages";
+
+    /**
+     * Pattern to detect error-related content in build logs.
+     * Matches common error indicators: error(s), exception(s), failed, fatal (case-insensitive).
+     */
+    private static final Pattern ERROR_PATTERN = Pattern.compile(
+            "(?i)\\b(errors?|exceptions?|failed|fatal)\\b",
+            Pattern.MULTILINE
+    );
+
+    /** Lines of context to include before and after each error-pattern match. */
+    private static final int ERROR_CONTEXT_LINES = 5;
+
     private boolean isGraphViewPluginAvailable = false;
     private transient String url;
     private transient Run<?, ?> run;
@@ -91,46 +110,164 @@ public class PipelineLogExtractor {
     }
 
     /**
-     * Extracts the log output of the specific step that caused the pipeline failure.
+     * Scans the full build console log for lines matching common error patterns
+     * and returns them with surrounding context lines, up to {@code maxLines} total.
+     * <p>
+     * This is used as a fallback when the FlowGraph walk fails to find a failed step
+     * with a log — for example when errors occur inside {@code catchError} blocks where
+     * the exception is swallowed and no {@code ErrorAction} is recorded on the FlowGraph,
+     * or when errors appear early in a large build log and would be missed by the
+     * last-N-lines approach.
+     * <p>
+     * Matched patterns include: {@code error}, {@code exception}, {@code failed}, and
+     * {@code fatal} (case-insensitive, word-boundary anchored).
      *
-     * @return A non-null list of log lines for the failed step, or the overall build log if
-     *         no failed step with a log is found.
+     * @return list of error-context lines (ordered as they appear in the log),
+     *         or an empty list if no patterns are found or the log cannot be read
+     */
+    private List<String> getErrorPatternLines() {
+        List<String> result = new ArrayList<>();
+        LinkedList<String> contextBuffer = new LinkedList<>();
+        int futureContextRemaining = 0;
+
+        try (InputStream inputStream = run.getLogInputStream();
+             BufferedReader reader = new BufferedReader(
+                     new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+            String rawLine;
+            while ((rawLine = reader.readLine()) != null) {
+                if (result.size() >= maxLines) {
+                    break;
+                }
+                String line = ConsoleNote.removeNotes(rawLine);
+                boolean isErrorLine = ERROR_PATTERN.matcher(line).find();
+
+                if (isErrorLine) {
+                    // Flush accumulated pre-context lines before adding the error line
+                    while (!contextBuffer.isEmpty() && result.size() < maxLines) {
+                        result.add(contextBuffer.removeFirst());
+                    }
+                    contextBuffer.clear();
+                    if (result.size() < maxLines) {
+                        result.add(line);
+                    }
+                    futureContextRemaining = ERROR_CONTEXT_LINES;
+                } else if (futureContextRemaining > 0) {
+                    result.add(line); // L141 already guarantees result.size() < maxLines here
+                    futureContextRemaining--;
+                } else {
+                    contextBuffer.add(line);
+                    if (contextBuffer.size() > ERROR_CONTEXT_LINES) {
+                        contextBuffer.removeFirst();
+                    }
+                }
+            }
+        } catch (IOException e) {
+            LOGGER.warning("Could not read full log for error pattern scan: " + e.getMessage());
+            return Collections.emptyList();
+        }
+
+        return result;
+    }
+
+    /**
+     * Extracts the log output of the step(s) that caused the pipeline failure,
+     * combining results from multiple strategies so that parallel failures
+     * (e.g. both a Rspec test failure and a RuboCop offense) are all captured.
+     * <ol>
+     *   <li><b>Strategy 1 — ErrorAction multi-collect:</b> walks the FlowGraph and collects
+     *       logs from <em>all</em> nodes with {@link ErrorAction} and an associated
+     *       {@link LogAction} (explicit uncaught exceptions). Unlike the original single-return
+     *       approach, this accumulates logs from every failing step up to {@code maxLines}
+     *       total, covering parallel failures such as multiple Rspec pod crashes.</li>
+     *   <li><b>Strategy 3 — Error pattern scan (always runs as supplement):</b> reads the
+     *       full build console log and appends lines matching common error patterns (with
+     *       surrounding context) that were not already captured by Strategy 1.
+     *       This fills the gap left by {@code catchError + sh(returnStatus:true) + error()}
+     *       pipelines (where no {@link LogAction} exists on the {@code error()} step) and
+     *       catches errors that appear early in large build logs.</li>
+     * </ol>
+     * Falls back to {@code run.getLog(maxLines)} (last N lines of console) only if all
+     * strategies produce no results.
+     *
+     * @return A non-null list of log lines combining all relevant failure output, capped at
+     *         {@code maxLines}.
      * @throws IOException if there is an error reading the build logs.
      */
     public List<String> getFailedStepLog() throws IOException {
+        List<String> accumulated = new ArrayList<>();
+        String primaryNodeId = null;
 
         if (this.run instanceof WorkflowRun) {
             FlowExecution execution = ((WorkflowRun) this.run).getExecution();
-            if (execution == null) {
-                setUrl("0");
-                return run.getLog(maxLines);
-            }
 
-            FlowGraphWalker walker = new FlowGraphWalker(execution);
-            for (FlowNode node : walker) {
-                ErrorAction errorAction = node.getAction(ErrorAction.class);
-                if (errorAction != null) {
-                    FlowNode nodeThatThrewException = ErrorAction.findOrigin(errorAction.getError(), execution);
-                    if (nodeThatThrewException == null) {
-                        continue;
-                    }
-                    LogAction logAction = nodeThatThrewException.getAction(LogAction.class);
-                    if (logAction != null) {
-                        AnnotatedLargeText<? extends FlowNode> logText = logAction.getLogText();
-                        List<String> result = readLimitedLog(logText, this.maxLines);
-                        if (result == null || result.isEmpty())
-                        {
-                            continue;
-                        }
-                        setUrl(nodeThatThrewException.getId());
-                        return result;
-                   }
+            if (execution != null) {
+                // Strategy 1: collect logs from ALL ErrorAction+LogAction nodes.
+                // Multi-collect instead of returning on first match so that parallel failures
+                // (e.g. multiple Rspec pods + a direct sh failure) are all captured.
+                Set<String> seenOriginIds = new HashSet<>();
+                FlowGraphWalker walker = new FlowGraphWalker(execution);
+                for (FlowNode node : walker) {
+                    int remainingLines = this.maxLines - accumulated.size();
+                    if (remainingLines <= 0) break;
+                    ErrorAction errorAction = node.getAction(ErrorAction.class);
+                    if (errorAction == null) continue;
+                    FlowNode origin = resolveOrigin(errorAction.getError(), execution);
+                    if (origin == null || seenOriginIds.contains(origin.getId())) continue;
+                    LogAction logAction = origin.getAction(LogAction.class);
+                    if (logAction == null) continue;
+                    List<String> stepLog = readLimitedLog(logAction.getLogText(), remainingLines);
+                    seenOriginIds.add(origin.getId());
+                    if (primaryNodeId == null) primaryNodeId = origin.getId();
+                    accumulated.addAll(stepLog);
                 }
+
             }
         }
-        /* Reference to pipeline overview or console output */
+
+        // Strategy 3: scan the full console log for error-pattern lines.
+        // Always runs as a supplement to fill gaps not covered by the FlowGraph walk —
+        // most importantly the catchError + sh(returnStatus:true) + error() pattern where
+        // the error() step has no LogAction, and errors that appear early in large build logs.
+        // Only lines not already present in the accumulated result are added.
+        int budget = this.maxLines - accumulated.size();
+        if (budget > 0) {
+            List<String> patternLines = getErrorPatternLines();
+            if (!patternLines.isEmpty()) {
+                // Only dedupe against lines already collected by Strategy 1; do not add
+                // to the set inside the stream so repeated occurrences of the same line
+                // (e.g. retries) are preserved when they appear in different contexts.
+                Set<String> existingLines = new HashSet<>(accumulated);
+                patternLines.stream()
+                        .filter(line -> !existingLines.contains(line))
+                        .limit(budget)
+                        .forEach(accumulated::add);
+                LOGGER.fine("Strategy 3 scan complete: " + accumulated.size() + " total lines accumulated");
+            }
+        }
+
+        if (!accumulated.isEmpty()) {
+            setUrl(primaryNodeId != null ? primaryNodeId : "0");
+            return accumulated;
+        }
+
+        // Final fallback: last N lines of the full build console log
         setUrl("0");
         return run.getLog(maxLines);
+    }
+
+    /**
+     * Finds the {@link FlowNode} that originally threw the given error within the given execution.
+     * <p>
+     * Delegates to {@link ErrorAction#findOrigin}. Package-private to allow overriding in unit
+     * tests via Mockito {@code spy}, so that the null-origin and duplicate-origin branches of
+     * the Strategy 1 loop can be exercised without depending on specific Jenkins CPS behaviour.
+     *
+     * @param error     the throwable stored in the node's {@link ErrorAction}
+     * @param execution the current flow execution to search
+     * @return the origin {@link FlowNode}, or {@code null} if not found
+     */
+    FlowNode resolveOrigin(Throwable error, FlowExecution execution) {
+        return ErrorAction.findOrigin(error, execution);
     }
 
     private void setUrl(String node)
