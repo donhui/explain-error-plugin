@@ -12,8 +12,11 @@ import org.jenkinsci.plugins.workflow.actions.WarningAction;
 
 import hudson.console.AnnotatedLargeText;
 import hudson.console.ConsoleNote;
+import hudson.model.Cause;
 import hudson.model.Result;
 import hudson.model.Run;
+import jenkins.model.CauseOfInterruption;
+import jenkins.model.InterruptedBuildAction;
 import jenkins.model.Jenkins;
 
 import java.io.BufferedReader;
@@ -66,10 +69,14 @@ public class PipelineLogExtractor {
     /** Lines of context to include before and after each error-pattern match. */
     private static final int ERROR_CONTEXT_LINES = 5;
 
+    /** Maximum recursion depth when following downstream (sub-job) failures. */
+    private static final int MAX_DOWNSTREAM_DEPTH = 5;
+
     private boolean isGraphViewPluginAvailable = false;
     private transient String url;
     private transient Run<?, ?> run;
     private int maxLines;
+    private int downstreamDepth;
 
     /**
      * Reads the provided log text and returns at most the last {@code maxLines} lines.
@@ -297,12 +304,20 @@ public class PipelineLogExtractor {
 
         if (!accumulated.isEmpty()) {
             setUrl(primaryNodeId != null ? primaryNodeId : "0");
-            return accumulated;
+        } else {
+            // Final fallback: last N lines of the full build console log
+            setUrl("0");
+            accumulated.addAll(run.getLog(maxLines));
         }
 
-        // Final fallback: last N lines of the full build console log
-        setUrl("0");
-        return run.getLog(maxLines);
+        // Collect logs from failed downstream (sub-job) builds, recursively
+        if (downstreamDepth == 0) {
+            Set<String> visitedRunIds = new HashSet<>();
+            visitedRunIds.add(run.getParent().getFullName() + "#" + run.getNumber());
+            collectDownstreamLogs(accumulated, visitedRunIds);
+        }
+
+        return accumulated;
     }
 
     /**
@@ -347,10 +362,232 @@ public class PipelineLogExtractor {
 
     public PipelineLogExtractor(Run<?, ?> run, int maxLines)
     {
+        this(run, maxLines, 0);
+    }
+
+    private PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth)
+    {
         this.run = run;
         this.maxLines = maxLines;
+        this.downstreamDepth = downstreamDepth;
         if (Jenkins.get().getPlugin("pipeline-graph-view") != null) {
             isGraphViewPluginAvailable = true;
         }
+    }
+
+    /**
+     * Collects error logs from failed downstream (sub-job) builds triggered by this run.
+     * <p>
+     * Supports two discovery mechanisms:
+     * <ol>
+     *   <li><b>DownstreamBuildAction</b> (pipeline-build-step plugin): reads the
+     *       {@link org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction}
+     *       attached to the current run to find builds triggered by the {@code build} step.</li>
+     *   <li><b>Cause.UpstreamCause</b>: scans all jobs in Jenkins for builds whose
+     *       {@link Cause.UpstreamCause} points back to this run. This covers cases where
+     *       the pipeline-build-step plugin is not installed.</li>
+     * </ol>
+     * Recursion is bounded by {@link #MAX_DOWNSTREAM_DEPTH} to prevent infinite loops.
+     *
+     * @param accumulated the list to append downstream log lines into
+     * @param visitedRunIds set of already-visited run IDs (job full name + "#" + build number)
+     *                      used to prevent duplicate processing across recursive calls
+     */
+    void collectDownstreamLogs(List<String> accumulated, Set<String> visitedRunIds) {
+        if (downstreamDepth >= MAX_DOWNSTREAM_DEPTH) {
+            return;
+        }
+
+        // Strategy A: DownstreamBuildAction (pipeline-build-step plugin)
+        if (Jenkins.get().getPlugin("pipeline-build-step") != null) {
+            try {
+                collectViaDownstreamBuildAction(accumulated, visitedRunIds);
+            } catch (Exception e) {
+                LOGGER.warning("Failed to collect downstream logs via DownstreamBuildAction: " + e.getMessage());
+            }
+        }
+
+        // Strategy B: Cause.UpstreamCause — scan builds that list this run as upstream
+        try {
+            collectViaUpstreamCause(accumulated, visitedRunIds);
+        } catch (Exception e) {
+            LOGGER.warning("Failed to collect downstream logs via UpstreamCause: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Discovers failed downstream builds via
+     * {@link org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction}
+     * and appends their logs to {@code accumulated}.
+     */
+    private void collectViaDownstreamBuildAction(List<String> accumulated, Set<String> visitedRunIds) throws IOException {
+        org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction action =
+                run.getAction(org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction.class);
+        if (action == null) {
+            return;
+        }
+        for (org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction.DownstreamBuild db : action.getDownstreamBuilds()) {
+            Run<?, ?> downstreamRun = db.getBuild();
+            if (downstreamRun == null) {
+                continue;
+            }
+            appendDownstreamRunLog(downstreamRun, accumulated, visitedRunIds);
+        }
+    }
+
+    /**
+     * Discovers failed downstream builds by scanning all jobs for builds whose
+     * {@link Cause.UpstreamCause} points to this run, and appends their logs to
+     * {@code accumulated}.
+     */
+    private void collectViaUpstreamCause(List<String> accumulated, Set<String> visitedRunIds) throws IOException {
+        String thisJobName = run.getParent().getFullName();
+        int thisBuildNumber = run.getNumber();
+
+        for (hudson.model.Job<?, ?> job : Jenkins.get().getAllItems(hudson.model.Job.class)) {
+            // Skip the current job itself
+            if (job.getFullName().equals(thisJobName)) {
+                continue;
+            }
+            Run<?, ?> lastBuild = job.getLastBuild();
+            if (lastBuild == null) {
+                continue;
+            }
+            // Walk recent builds of this job to find ones triggered by our run
+            for (Run<?, ?> candidate = lastBuild; candidate != null; candidate = candidate.getPreviousBuild()) {
+                // Only look at builds that could have been triggered by our run
+                if (candidate.getTimeInMillis() < run.getTimeInMillis()) {
+                    break;
+                }
+                for (Cause cause : candidate.getCauses()) {
+                    if (cause instanceof Cause.UpstreamCause) {
+                        Cause.UpstreamCause upstreamCause = (Cause.UpstreamCause) cause;
+                        if (upstreamCause.getUpstreamProject().equals(thisJobName)
+                                && upstreamCause.getUpstreamBuild() == thisBuildNumber) {
+                            appendDownstreamRunLog(candidate, accumulated, visitedRunIds);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns {@code true} if the given run was aborted because a sibling branch triggered
+     * a fail-fast interruption (e.g. via {@code parallelsAlwaysFailFast()} or
+     * {@code parallel(failFast: true, ...)}).
+     * <p>
+     * Jenkins records the interruption cause in an {@link InterruptedBuildAction} attached to
+     * the run. When the cause is a fail-fast signal, its
+     * {@link CauseOfInterruption#getShortDescription()} contains the phrase "fail fast"
+     * (case-insensitive). This distinguishes a sibling-aborted run from a run that was
+     * independently aborted by a user or another mechanism.
+     *
+     * @param run the build to inspect
+     * @return {@code true} if the build was interrupted by a fail-fast signal
+     */
+    boolean isAbortedByFailFast(Run<?, ?> run) {
+        if (run.getResult() != Result.ABORTED) {
+            return false;
+        }
+        for (InterruptedBuildAction action : run.getActions(InterruptedBuildAction.class)) {
+            for (CauseOfInterruption cause : action.getCauses()) {
+                String desc = cause.getShortDescription();
+                if (desc != null && desc.toLowerCase(java.util.Locale.ROOT).contains("fail fast")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Appends the error content of a single downstream run to {@code accumulated},
+     * then recurses into its own downstream builds.
+     * <p>
+     * <b>Fast path — reuse existing AI explanation:</b> if the downstream run already has an
+     * {@link ErrorExplanationAction} (i.e. the sub-job called {@code explainError()} itself),
+     * its pre-computed explanation text is used directly. This avoids a redundant AI call and
+     * preserves the full context that was available when the sub-job ran.
+     * <p>
+     * <b>Slow path — extract raw logs:</b> when no {@link ErrorExplanationAction} is present,
+     * a {@link PipelineLogExtractor} is created for the downstream run and its log lines are
+     * appended as before.
+     * <p>
+     * Builds that were aborted by a fail-fast signal from a sibling branch are labelled
+     * {@code ABORTED (interrupted by fail-fast, not the root cause)} in the section header
+     * so that the AI can distinguish them from the build that actually caused the failure.
+     *
+     * @param downstreamRun  the downstream build to extract content from
+     * @param accumulated    the list to append content lines into
+     * @param visitedRunIds  set of already-visited run IDs to prevent duplicates
+     */
+    private void appendDownstreamRunLog(Run<?, ?> downstreamRun, List<String> accumulated,
+                                        Set<String> visitedRunIds) throws IOException {
+        if (downstreamRun.getResult() == null || !downstreamRun.getResult().isWorseThan(Result.SUCCESS)) {
+            return;
+        }
+        String runId = downstreamRun.getParent().getFullName() + "#" + downstreamRun.getNumber();
+        if (!visitedRunIds.add(runId)) {
+            return; // already processed
+        }
+        int remaining = this.maxLines - accumulated.size();
+        if (remaining <= 0) {
+            return;
+        }
+
+        boolean failFastAborted = isAbortedByFailFast(downstreamRun);
+        String resultLabel = failFastAborted
+            ? "ABORTED (interrupted by fail-fast, not the root cause)"
+            : String.valueOf(downstreamRun.getResult());
+
+        List<String> header = Arrays.asList(
+            "### Downstream Job: " + downstreamRun.getParent().getFullName()
+                + " #" + downstreamRun.getNumber() + " ###",
+            "Result: " + resultLabel,
+            "--- LOG CONTENT ---"
+        );
+
+        String runUrl = run.getUrl();
+
+        // Fast path: sub-job already has an AI explanation — reuse it directly.
+        ErrorExplanationAction existingExplanation = downstreamRun.getAction(ErrorExplanationAction.class);
+        if (existingExplanation != null && existingExplanation.hasValidExplanation()) {
+            // Redirect "View failure output" to the sub-job's own explanation URL when available.
+            if (!failFastAborted && existingExplanation.getUrlString() != null && this.url != null
+                    && runUrl != null && this.url.contains(runUrl)) {
+                this.url = existingExplanation.getUrlString();
+            }
+            accumulated.addAll(header);
+            accumulated.add("[AI explanation from sub-job]");
+            accumulated.addAll(Arrays.asList(existingExplanation.getExplanation().split("\n", -1)));
+            accumulated.add("### END OF DOWNSTREAM JOB: " + downstreamRun.getParent().getFullName() + " ###");
+            // No need to recurse further — the sub-job's explanation already covers its own
+            // downstream failures (it was produced with full context at the time of the failure).
+            return;
+        }
+
+        // Slow path: no existing explanation — extract raw logs as before.
+        PipelineLogExtractor subExtractor = new PipelineLogExtractor(downstreamRun, remaining, downstreamDepth + 1);
+        List<String> subLog = subExtractor.getFailedStepLog();
+        if (subLog == null || subLog.isEmpty()) {
+            return;
+        }
+
+        // If this sub-job genuinely failed (not just aborted by fail-fast) and the parent
+        // URL still points to the parent job (i.e. no prior real sub-job failure has already
+        // claimed the URL), redirect "View failure output" to the sub-job's failing node.
+        if (!failFastAborted && subExtractor.getUrl() != null && this.url != null
+                && runUrl != null && this.url.contains(runUrl)) {
+            this.url = subExtractor.getUrl();
+        }
+
+        accumulated.addAll(header);
+        accumulated.addAll(subLog);
+        accumulated.add("### END OF DOWNSTREAM JOB: " + downstreamRun.getParent().getFullName() + " ###");
+
+        // Recurse into sub-job's own downstream builds
+        subExtractor.collectDownstreamLogs(accumulated, visitedRunIds);
     }
 }
