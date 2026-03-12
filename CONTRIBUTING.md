@@ -10,7 +10,7 @@ This guide will help you get started with development and contribution.
 
 - **Java**: Version 17 or later
 - **Maven**: Version 3.9 or later
-- **Jenkins**: Version 2.479.3 or later for testing
+- **Jenkins**: Version 2.528.3 or later for testing
 - **Git**: For version control
 - **IDE**: IntelliJ IDEA or VS Code recommended
 

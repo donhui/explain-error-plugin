@@ -275,7 +275,7 @@ Works with Freestyle, Declarative, or any job type.
 |-------|----------|
 |API key not set	| Add your key in Jenkins global config |
 |Auth or rate limit error| Check key validity, quota, and provider plan |
-|Button not visible	| Ensure Jenkins version ≥ 2.479.3, restart Jenkins after installation |
+|Button not visible	| Ensure Jenkins version ≥ 2.528.3, restart Jenkins after installation |
 
 Enable debug logs:
 
