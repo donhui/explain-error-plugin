@@ -4,6 +4,7 @@ import hudson.Extension;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import java.util.Set;
+import jenkins.model.Jenkins;
 import org.jenkinsci.plugins.workflow.steps.Step;
 import org.jenkinsci.plugins.workflow.steps.StepContext;
 import org.jenkinsci.plugins.workflow.steps.StepDescriptor;
@@ -130,7 +131,7 @@ public class ExplainErrorStep extends Step {
             ErrorExplainer explainer = new ErrorExplainer();
             String explanation = explainer.explainError(run, listener, step.getLogPattern(), step.getMaxLines(),
                     step.getLanguage(), step.getCustomContext(), step.isCollectDownstreamLogs(),
-                    step.getDownstreamJobPattern());
+                    step.getDownstreamJobPattern(), Jenkins.getAuthentication2());
 
             return explanation;
         }
