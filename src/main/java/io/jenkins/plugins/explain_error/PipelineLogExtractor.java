@@ -36,6 +36,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * Utility for extracting log lines related to a failing build or pipeline step
@@ -72,11 +73,16 @@ public class PipelineLogExtractor {
     /** Maximum recursion depth when following downstream (sub-job) failures. */
     private static final int MAX_DOWNSTREAM_DEPTH = 5;
 
+    /** Hard cap for recent builds scanned per job when falling back to UpstreamCause lookup. */
+    private static final int MAX_UPSTREAM_CAUSE_CANDIDATES_PER_JOB = 100;
+
     private boolean isGraphViewPluginAvailable = false;
     private transient String url;
     private transient Run<?, ?> run;
     private int maxLines;
     private int downstreamDepth;
+    private final boolean collectDownstreamLogs;
+    private final Pattern downstreamJobPattern;
 
     /**
      * Reads the provided log text and returns at most the last {@code maxLines} lines.
@@ -311,7 +317,7 @@ public class PipelineLogExtractor {
         }
 
         // Collect logs from failed downstream (sub-job) builds, recursively
-        if (downstreamDepth == 0) {
+        if (collectDownstreamLogs && downstreamDepth == 0) {
             Set<String> visitedRunIds = new HashSet<>();
             visitedRunIds.add(run.getParent().getFullName() + "#" + run.getNumber());
             collectDownstreamLogs(accumulated, visitedRunIds);
@@ -362,16 +368,36 @@ public class PipelineLogExtractor {
 
     public PipelineLogExtractor(Run<?, ?> run, int maxLines)
     {
-        this(run, maxLines, 0);
+        this(run, maxLines, false, null);
     }
 
-    private PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth)
+    public PipelineLogExtractor(Run<?, ?> run, int maxLines, boolean collectDownstreamLogs, String downstreamJobPattern)
+    {
+        this(run, maxLines, 0, collectDownstreamLogs,
+                compileDownstreamJobPattern(collectDownstreamLogs, downstreamJobPattern));
+    }
+
+    private PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth, boolean collectDownstreamLogs,
+                                 Pattern downstreamJobPattern)
     {
         this.run = run;
         this.maxLines = maxLines;
         this.downstreamDepth = downstreamDepth;
+        this.collectDownstreamLogs = collectDownstreamLogs;
+        this.downstreamJobPattern = downstreamJobPattern;
         if (Jenkins.get().getPlugin("pipeline-graph-view") != null) {
             isGraphViewPluginAvailable = true;
+        }
+    }
+
+    private static Pattern compileDownstreamJobPattern(boolean collectDownstreamLogs, String downstreamJobPattern) {
+        if (!collectDownstreamLogs || downstreamJobPattern == null || downstreamJobPattern.isBlank()) {
+            return null;
+        }
+        try {
+            return Pattern.compile(downstreamJobPattern);
+        } catch (PatternSyntaxException e) {
+            throw new IllegalArgumentException("Invalid downstream job pattern: " + e.getMessage(), e);
         }
     }
 
@@ -394,17 +420,23 @@ public class PipelineLogExtractor {
      *                      used to prevent duplicate processing across recursive calls
      */
     void collectDownstreamLogs(List<String> accumulated, Set<String> visitedRunIds) {
-        if (downstreamDepth >= MAX_DOWNSTREAM_DEPTH) {
+        boolean foundViaDownstreamBuildAction = false;
+        if (!collectDownstreamLogs || downstreamJobPattern == null
+                || downstreamDepth >= MAX_DOWNSTREAM_DEPTH || !hasRemainingCapacity(accumulated)) {
             return;
         }
 
         // Strategy A: DownstreamBuildAction (pipeline-build-step plugin)
         if (Jenkins.get().getPlugin("pipeline-build-step") != null) {
             try {
-                collectViaDownstreamBuildAction(accumulated, visitedRunIds);
+                foundViaDownstreamBuildAction = collectViaDownstreamBuildAction(accumulated, visitedRunIds);
             } catch (Exception e) {
                 LOGGER.warning("Failed to collect downstream logs via DownstreamBuildAction: " + e.getMessage());
             }
+        }
+
+        if (foundViaDownstreamBuildAction || !hasRemainingCapacity(accumulated)) {
+            return;
         }
 
         // Strategy B: Cause.UpstreamCause — scan builds that list this run as upstream
@@ -420,19 +452,25 @@ public class PipelineLogExtractor {
      * {@link org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction}
      * and appends their logs to {@code accumulated}.
      */
-    private void collectViaDownstreamBuildAction(List<String> accumulated, Set<String> visitedRunIds) throws IOException {
+    private boolean collectViaDownstreamBuildAction(List<String> accumulated, Set<String> visitedRunIds) throws IOException {
         org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction action =
                 run.getAction(org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction.class);
         if (action == null) {
-            return;
+            return false;
         }
+        boolean foundMatchingDownstream = false;
         for (org.jenkinsci.plugins.workflow.support.steps.build.DownstreamBuildAction.DownstreamBuild db : action.getDownstreamBuilds()) {
+            if (!hasRemainingCapacity(accumulated)) {
+                return foundMatchingDownstream;
+            }
             Run<?, ?> downstreamRun = db.getBuild();
-            if (downstreamRun == null) {
+            if (downstreamRun == null || !matchesDownstreamJob(downstreamRun)) {
                 continue;
             }
+            foundMatchingDownstream = true;
             appendDownstreamRunLog(downstreamRun, accumulated, visitedRunIds);
         }
+        return foundMatchingDownstream;
     }
 
     /**
@@ -443,8 +481,15 @@ public class PipelineLogExtractor {
     private void collectViaUpstreamCause(List<String> accumulated, Set<String> visitedRunIds) throws IOException {
         String thisJobName = run.getParent().getFullName();
         int thisBuildNumber = run.getNumber();
+        long thisBuildStartTime = run.getTimeInMillis();
 
         for (hudson.model.Job<?, ?> job : Jenkins.get().getAllItems(hudson.model.Job.class)) {
+            if (!hasRemainingCapacity(accumulated)) {
+                return;
+            }
+            if (!matchesDownstreamJob(job.getFullName())) {
+                continue;
+            }
             // Skip the current job itself
             if (job.getFullName().equals(thisJobName)) {
                 continue;
@@ -453,10 +498,15 @@ public class PipelineLogExtractor {
             if (lastBuild == null) {
                 continue;
             }
+            int scannedCandidates = 0;
             // Walk recent builds of this job to find ones triggered by our run
             for (Run<?, ?> candidate = lastBuild; candidate != null; candidate = candidate.getPreviousBuild()) {
+                if (!hasRemainingCapacity(accumulated) || scannedCandidates >= MAX_UPSTREAM_CAUSE_CANDIDATES_PER_JOB) {
+                    break;
+                }
+                scannedCandidates++;
                 // Only look at builds that could have been triggered by our run
-                if (candidate.getTimeInMillis() < run.getTimeInMillis()) {
+                if (candidate.getTimeInMillis() < thisBuildStartTime) {
                     break;
                 }
                 for (Cause cause : candidate.getCauses()) {
@@ -500,6 +550,18 @@ public class PipelineLogExtractor {
             }
         }
         return false;
+    }
+
+    private boolean hasRemainingCapacity(List<String> accumulated) {
+        return accumulated.size() < maxLines;
+    }
+
+    private boolean matchesDownstreamJob(Run<?, ?> downstreamRun) {
+        return matchesDownstreamJob(downstreamRun.getParent().getFullName());
+    }
+
+    private boolean matchesDownstreamJob(String jobFullName) {
+        return downstreamJobPattern != null && downstreamJobPattern.matcher(jobFullName).matches();
     }
 
     /**
@@ -569,7 +631,8 @@ public class PipelineLogExtractor {
         }
 
         // Slow path: no existing explanation — extract raw logs as before.
-        PipelineLogExtractor subExtractor = new PipelineLogExtractor(downstreamRun, remaining, downstreamDepth + 1);
+        PipelineLogExtractor subExtractor = new PipelineLogExtractor(downstreamRun, remaining, downstreamDepth + 1,
+                collectDownstreamLogs, downstreamJobPattern);
         List<String> subLog = subExtractor.getFailedStepLog();
         if (subLog == null || subLog.isEmpty()) {
             return;
