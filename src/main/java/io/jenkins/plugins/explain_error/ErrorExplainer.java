@@ -30,14 +30,19 @@ public class ErrorExplainer {
     }
 
     public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines) {
-        return explainError(run, listener, logPattern, maxLines, null, null);
+        return explainError(run, listener, logPattern, maxLines, null, null, false, null);
     }
 
     public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines, String language) {
-        return explainError(run, listener, logPattern, maxLines, language, null);
+        return explainError(run, listener, logPattern, maxLines, language, null, false, null);
     }
 
     public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines, String language, String customContext) {
+        return explainError(run, listener, logPattern, maxLines, language, customContext, false, null);
+    }
+
+    public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines, String language,
+                               String customContext, boolean collectDownstreamLogs, String downstreamJobPattern) {
         String jobInfo = run != null ? ("[" + run.getParent().getFullName() + " #" + run.getNumber() + "]") : "[unknown]";
         try {
             // Check if explanation is enabled (folder-level or global)
@@ -54,7 +59,7 @@ public class ErrorExplainer {
             }
 
             // Extract error logs
-            String errorLogs = extractErrorLogs(run, logPattern, maxLines);
+            String errorLogs = extractErrorLogs(run, logPattern, maxLines, collectDownstreamLogs, downstreamJobPattern);
 
             // Use step-level customContext if provided, otherwise fallback to global
             String effectiveCustomContext = StringUtils.isNotBlank(customContext) ? customContext : GlobalConfigurationImpl.get().getCustomContext();
@@ -83,8 +88,9 @@ public class ErrorExplainer {
         }
     }
 
-    private String extractErrorLogs(Run<?, ?> run, String logPattern, int maxLines) throws IOException {
-        PipelineLogExtractor logExtractor = new PipelineLogExtractor(run, maxLines);
+    private String extractErrorLogs(Run<?, ?> run, String logPattern, int maxLines,
+                                    boolean collectDownstreamLogs, String downstreamJobPattern) throws IOException {
+        PipelineLogExtractor logExtractor = new PipelineLogExtractor(run, maxLines, collectDownstreamLogs, downstreamJobPattern);
         List<String> logLines =  logExtractor.getFailedStepLog();
         this.urlString = logExtractor.getUrl();
 
