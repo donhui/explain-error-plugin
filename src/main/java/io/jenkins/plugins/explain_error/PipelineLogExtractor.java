@@ -588,10 +588,6 @@ public class PipelineLogExtractor {
         return accumulated.size() < maxLines;
     }
 
-    private boolean matchesDownstreamJob(Run<?, ?> downstreamRun) {
-        return matchesDownstreamJob(downstreamRun.getParent().getFullName());
-    }
-
     private boolean matchesDownstreamJob(String jobFullName) {
         return downstreamJobPattern != null && downstreamJobPattern.matcher(jobFullName).matches();
     }
