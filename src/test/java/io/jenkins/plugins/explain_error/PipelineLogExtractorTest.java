@@ -23,7 +23,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.regex.Pattern;
 import jenkins.model.CauseOfInterruption;
 import jenkins.model.InterruptedBuildAction;
 import org.jenkinsci.plugins.workflow.actions.LogAction;
@@ -589,11 +588,8 @@ class PipelineLogExtractorTest {
         FreeStyleProject project = jenkins.createFreeStyleProject("depth-guard-project");
         FreeStyleBuild build = jenkins.buildAndAssertSuccess(project);
 
-        // Access the package-private constructor via reflection to set depth = MAX (5)
-        java.lang.reflect.Constructor<PipelineLogExtractor> ctor =
-                PipelineLogExtractor.class.getDeclaredConstructor(Run.class, int.class, int.class, boolean.class, Pattern.class);
-        ctor.setAccessible(true);
-        PipelineLogExtractor extractor = ctor.newInstance(build, 200, 5, true, Pattern.compile(".*"));
+        // Construct at depth = MAX (5) to verify the guard in collectDownstreamLogs
+        PipelineLogExtractor extractor = new PipelineLogExtractor(build, 200, 5);
 
         List<String> accumulated = new ArrayList<>();
         Set<String> visited = new HashSet<>();

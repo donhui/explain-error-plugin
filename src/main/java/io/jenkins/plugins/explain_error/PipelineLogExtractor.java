@@ -1,5 +1,6 @@
 package io.jenkins.plugins.explain_error;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 
 import org.jenkinsci.plugins.workflow.flow.FlowExecution;
@@ -376,6 +377,12 @@ public class PipelineLogExtractor {
     {
         this(run, maxLines, 0, collectDownstreamLogs,
                 compileDownstreamJobPattern(collectDownstreamLogs, downstreamJobPattern));
+    }
+
+    @VisibleForTesting
+    PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth)
+    {
+        this(run, maxLines, downstreamDepth, true, Pattern.compile(".*"));
     }
 
     private PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth, boolean collectDownstreamLogs,
