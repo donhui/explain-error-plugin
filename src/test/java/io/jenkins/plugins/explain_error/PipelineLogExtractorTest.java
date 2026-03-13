@@ -13,10 +13,15 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import hudson.console.AnnotatedLargeText;
+import hudson.model.Cause;
 import hudson.model.FreeStyleBuild;
 import hudson.model.FreeStyleProject;
+import hudson.model.Item;
 import hudson.model.Result;
 import hudson.model.Run;
+import hudson.model.User;
+import hudson.security.ACL;
+import hudson.security.ACLContext;
 import io.jenkins.plugins.explain_error.provider.TestProvider;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -25,6 +30,7 @@ import java.util.List;
 import java.util.Set;
 import jenkins.model.CauseOfInterruption;
 import jenkins.model.InterruptedBuildAction;
+import jenkins.model.Jenkins;
 import org.jenkinsci.plugins.workflow.actions.LogAction;
 import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition;
 import org.jenkinsci.plugins.workflow.flow.FlowExecution;
@@ -34,8 +40,11 @@ import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.jvnet.hudson.test.FailureBuilder;
 import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.MockAuthorizationStrategy;
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
+import org.springframework.security.core.Authentication;
 
 /**
  * Integration tests for {@link PipelineLogExtractor}.
@@ -791,5 +800,80 @@ class PipelineLogExtractorTest {
                 "Sub-job logs must be skipped when the job name does not match the regex.\nActual log:\n" + log);
         assertFalse(log.contains("### Downstream Job: sub-job-pattern-miss"),
                 "No downstream section should be present for non-matching jobs.\nActual log:\n" + log);
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void downstream_invisibleBuildStepJob_replacedWithHiddenPlaceholder(JenkinsRule jenkins) throws Exception {
+        Authentication viewer = configureReadAccess(jenkins, "viewer-build-step");
+
+        WorkflowJob subJob = jenkins.createProject(WorkflowJob.class, "hidden-build-step-sub");
+        subJob.setDefinition(new CpsFlowDefinition(
+                "node { sh 'echo \"HIDDEN_BUILD_STEP_MARKER\" && exit 1' }", true));
+
+        WorkflowJob parentJob = jenkins.createProject(WorkflowJob.class, "visible-build-step-parent");
+        parentJob.setDefinition(new CpsFlowDefinition(
+                "build job: 'hidden-build-step-sub', propagate: false\n"
+                + "currentBuild.result = 'FAILURE'",
+                true));
+
+        grantItemRead(jenkins, "viewer-build-step", parentJob);
+
+        WorkflowRun parentRun = jenkins.assertBuildStatus(Result.FAILURE, parentJob.scheduleBuild2(0));
+
+        String log;
+        try (ACLContext ignored = ACL.as2(viewer)) {
+            PipelineLogExtractor extractor = new PipelineLogExtractor(parentRun, 500, viewer, true,
+                    "hidden-build-step-sub");
+            log = String.join("\n", extractor.getFailedStepLog());
+        }
+
+        assertTrue(log.contains("### Downstream Job: [hidden] ###"),
+                "Unreadable downstream jobs should be represented by a hidden placeholder.\nActual log:\n" + log);
+        assertTrue(log.contains("Downstream failure details omitted due to permissions."),
+                "Hidden placeholder should explain why downstream details are missing.\nActual log:\n" + log);
+        assertFalse(log.contains("HIDDEN_BUILD_STEP_MARKER"),
+                "Hidden downstream logs must not be exposed.\nActual log:\n" + log);
+    }
+
+    @Test
+    void downstream_invisibleUpstreamCauseJob_skippedByVisibilityFilter(JenkinsRule jenkins) throws Exception {
+        Authentication viewer = configureReadAccess(jenkins, "viewer-upstream-cause");
+
+        FreeStyleProject parentJob = jenkins.createFreeStyleProject("visible-upstream-parent");
+        grantItemRead(jenkins, "viewer-upstream-cause", parentJob);
+        FreeStyleBuild parentRun = jenkins.buildAndAssertSuccess(parentJob);
+
+        FreeStyleProject hiddenSubJob = jenkins.createFreeStyleProject("hidden-upstream-sub");
+        hiddenSubJob.getBuildersList().add(new FailureBuilder());
+        FreeStyleBuild hiddenSubRun = jenkins.assertBuildStatus(Result.FAILURE,
+                hiddenSubJob.scheduleBuild2(0, new Cause.UpstreamCause(parentRun)));
+        assertNotNull(hiddenSubRun, "Hidden downstream build should be created");
+
+        String log;
+        try (ACLContext ignored = ACL.as2(viewer)) {
+            PipelineLogExtractor extractor = new PipelineLogExtractor(parentRun, 500, viewer, true,
+                    "hidden-upstream-sub");
+            log = String.join("\n", extractor.getFailedStepLog());
+        }
+
+        assertFalse(log.contains("### Downstream Job:"),
+                "UpstreamCause fallback should skip unreadable downstream jobs entirely.\nActual log:\n" + log);
+    }
+
+    private Authentication configureReadAccess(JenkinsRule jenkins, String username) {
+        jenkins.jenkins.setSecurityRealm(jenkins.createDummySecurityRealm());
+        MockAuthorizationStrategy strategy = new MockAuthorizationStrategy()
+                .grant(Jenkins.READ)
+                .everywhere()
+                .to(username);
+        jenkins.jenkins.setAuthorizationStrategy(strategy);
+        return User.getById(username, true).impersonate2();
+    }
+
+    private void grantItemRead(JenkinsRule jenkins, String username, Item item) {
+        MockAuthorizationStrategy strategy = (MockAuthorizationStrategy) jenkins.jenkins.getAuthorizationStrategy();
+        strategy.grant(Item.READ).onItems(item).to(username);
+        jenkins.jenkins.setAuthorizationStrategy(strategy);
     }
 }

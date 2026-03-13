@@ -1,6 +1,7 @@
 package io.jenkins.plugins.explain_error;
 
 import com.google.common.annotations.VisibleForTesting;
+import hudson.model.Item;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 
 import org.jenkinsci.plugins.workflow.flow.FlowExecution;
@@ -16,10 +17,12 @@ import hudson.console.ConsoleNote;
 import hudson.model.Cause;
 import hudson.model.Result;
 import hudson.model.Run;
+import hudson.security.ACL;
+import hudson.security.ACLContext;
 import jenkins.model.CauseOfInterruption;
 import jenkins.model.InterruptedBuildAction;
 import jenkins.model.Jenkins;
-
+import org.springframework.security.core.Authentication;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.StringReader;
@@ -85,6 +88,7 @@ public class PipelineLogExtractor {
     private int downstreamDepth;
     private final boolean collectDownstreamLogs;
     private final Pattern downstreamJobPattern;
+    private final Authentication authentication;
 
     /**
      * Reads the provided log text and returns at most the last {@code maxLines} lines.
@@ -370,22 +374,29 @@ public class PipelineLogExtractor {
 
     public PipelineLogExtractor(Run<?, ?> run, int maxLines)
     {
-        this(run, maxLines, false, null);
+        this(run, maxLines, Jenkins.getAuthentication2(), false, null);
     }
 
     public PipelineLogExtractor(Run<?, ?> run, int maxLines, boolean collectDownstreamLogs, String downstreamJobPattern)
     {
-        this(run, maxLines, 0, collectDownstreamLogs,
+        this(run, maxLines, Jenkins.getAuthentication2(), collectDownstreamLogs, downstreamJobPattern);
+    }
+
+    PipelineLogExtractor(Run<?, ?> run, int maxLines, Authentication authentication,
+                         boolean collectDownstreamLogs, String downstreamJobPattern)
+    {
+        this(run, maxLines, 0, authentication, collectDownstreamLogs,
                 compileDownstreamJobPattern(collectDownstreamLogs, downstreamJobPattern));
     }
 
     @VisibleForTesting
     PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth)
     {
-        this(run, maxLines, downstreamDepth, true, Pattern.compile(".*"));
+        this(run, maxLines, downstreamDepth, Jenkins.getAuthentication2(), true, Pattern.compile(".*"));
     }
 
-    private PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth, boolean collectDownstreamLogs,
+    private PipelineLogExtractor(Run<?, ?> run, int maxLines, int downstreamDepth, Authentication authentication,
+                                 boolean collectDownstreamLogs,
                                  Pattern downstreamJobPattern)
     {
         this.run = run;
@@ -393,6 +404,7 @@ public class PipelineLogExtractor {
         this.downstreamDepth = downstreamDepth;
         this.collectDownstreamLogs = collectDownstreamLogs;
         this.downstreamJobPattern = downstreamJobPattern;
+        this.authentication = authentication != null ? authentication : Jenkins.getAuthentication2();
         if (Jenkins.get().getPlugin("pipeline-graph-view") != null) {
             isGraphViewPluginAvailable = true;
         }
@@ -474,8 +486,15 @@ public class PipelineLogExtractor {
             if (!hasRemainingCapacity(accumulated)) {
                 return foundMatchingDownstream;
             }
-            Run<?, ?> downstreamRun = db.getBuild();
-            if (downstreamRun == null || !matchesDownstreamJob(downstreamRun)) {
+            String jobFullName = db.getJobFullName();
+            if (!matchesDownstreamJob(jobFullName)) {
+                continue;
+            }
+            Run<?, ?> downstreamRun;
+            try (ACLContext ignored = ACL.as2(ACL.SYSTEM2)) {
+                downstreamRun = db.getBuild();
+            }
+            if (downstreamRun == null) {
                 continue;
             }
             foundMatchingDownstream = true;
@@ -494,39 +513,41 @@ public class PipelineLogExtractor {
         int thisBuildNumber = run.getNumber();
         long thisBuildStartTime = run.getTimeInMillis();
 
-        for (hudson.model.Job<?, ?> job : Jenkins.get().getAllItems(hudson.model.Job.class)) {
-            if (!hasRemainingCapacity(accumulated)) {
-                return;
-            }
-            if (!matchesDownstreamJob(job.getFullName())) {
-                continue;
-            }
-            // Skip the current job itself
-            if (job.getFullName().equals(thisJobName)) {
-                continue;
-            }
-            Run<?, ?> lastBuild = job.getLastBuild();
-            if (lastBuild == null) {
-                continue;
-            }
-            int scannedCandidates = 0;
-            // Walk recent builds of this job to find ones triggered by our run
-            for (Run<?, ?> candidate = lastBuild; candidate != null; candidate = candidate.getPreviousBuild()) {
-                if (!hasRemainingCapacity(accumulated) || scannedCandidates >= MAX_UPSTREAM_CAUSE_CANDIDATES_PER_JOB) {
-                    break;
+        try (ACLContext ignored = ACL.as2(authentication)) {
+            for (hudson.model.Job<?, ?> job : Jenkins.get().getAllItems(hudson.model.Job.class)) {
+                if (!hasRemainingCapacity(accumulated)) {
+                    return;
                 }
-                scannedCandidates++;
-                // Only look at builds that could have been triggered by our run
-                if (candidate.getTimeInMillis() < thisBuildStartTime) {
-                    break;
+                if (!job.hasPermission(Item.READ) || !matchesDownstreamJob(job.getFullName())) {
+                    continue;
                 }
-                for (Cause cause : candidate.getCauses()) {
-                    if (cause instanceof Cause.UpstreamCause) {
-                        Cause.UpstreamCause upstreamCause = (Cause.UpstreamCause) cause;
-                        if (upstreamCause.getUpstreamProject().equals(thisJobName)
-                                && upstreamCause.getUpstreamBuild() == thisBuildNumber) {
-                            appendDownstreamRunLog(candidate, accumulated, visitedRunIds);
-                            break;
+                // Skip the current job itself
+                if (job.getFullName().equals(thisJobName)) {
+                    continue;
+                }
+                Run<?, ?> lastBuild = job.getLastBuild();
+                if (lastBuild == null) {
+                    continue;
+                }
+                int scannedCandidates = 0;
+                // Walk recent builds of this job to find ones triggered by our run
+                for (Run<?, ?> candidate = lastBuild; candidate != null; candidate = candidate.getPreviousBuild()) {
+                    if (!hasRemainingCapacity(accumulated) || scannedCandidates >= MAX_UPSTREAM_CAUSE_CANDIDATES_PER_JOB) {
+                        break;
+                    }
+                    scannedCandidates++;
+                    // Only look at builds that could have been triggered by our run
+                    if (candidate.getTimeInMillis() < thisBuildStartTime) {
+                        break;
+                    }
+                    for (Cause cause : candidate.getCauses()) {
+                        if (cause instanceof Cause.UpstreamCause) {
+                            Cause.UpstreamCause upstreamCause = (Cause.UpstreamCause) cause;
+                            if (upstreamCause.getUpstreamProject().equals(thisJobName)
+                                    && upstreamCause.getUpstreamBuild() == thisBuildNumber) {
+                                appendDownstreamRunLog(candidate, accumulated, visitedRunIds);
+                                break;
+                            }
                         }
                     }
                 }
@@ -612,6 +633,10 @@ public class PipelineLogExtractor {
         if (remaining <= 0) {
             return;
         }
+        if (!canReadDownstreamRun(downstreamRun)) {
+            appendHiddenDownstreamPlaceholder(accumulated);
+            return;
+        }
 
         boolean failFastAborted = isAbortedByFailFast(downstreamRun);
         String resultLabel = failFastAborted
@@ -645,7 +670,7 @@ public class PipelineLogExtractor {
 
         // Slow path: no existing explanation — extract raw logs as before.
         PipelineLogExtractor subExtractor = new PipelineLogExtractor(downstreamRun, remaining, downstreamDepth + 1,
-                collectDownstreamLogs, downstreamJobPattern);
+                authentication, collectDownstreamLogs, downstreamJobPattern);
         List<String> subLog = subExtractor.getFailedStepLog();
         if (subLog == null || subLog.isEmpty()) {
             return;
@@ -665,5 +690,18 @@ public class PipelineLogExtractor {
 
         // Recurse into sub-job's own downstream builds
         subExtractor.collectDownstreamLogs(accumulated, visitedRunIds);
+    }
+
+    private boolean canReadDownstreamRun(Run<?, ?> downstreamRun) {
+        try (ACLContext ignored = ACL.as2(authentication)) {
+            return downstreamRun.getParent().hasPermission(Item.READ);
+        }
+    }
+
+    private void appendHiddenDownstreamPlaceholder(List<String> accumulated) {
+        accumulated.add("### Downstream Job: [hidden] ###");
+        accumulated.add("Result: UNAVAILABLE");
+        accumulated.add("Downstream failure details omitted due to permissions.");
+        accumulated.add("### END OF DOWNSTREAM JOB: [hidden] ###");
     }
 }
