@@ -34,6 +34,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -421,6 +422,7 @@ public class PipelineLogExtractor {
      */
     void collectDownstreamLogs(List<String> accumulated, Set<String> visitedRunIds) {
         boolean foundViaDownstreamBuildAction = false;
+        String runId = run.getParent().getFullName() + "#" + run.getNumber();
         if (!collectDownstreamLogs || downstreamJobPattern == null
                 || downstreamDepth >= MAX_DOWNSTREAM_DEPTH || !hasRemainingCapacity(accumulated)) {
             return;
@@ -431,7 +433,8 @@ public class PipelineLogExtractor {
             try {
                 foundViaDownstreamBuildAction = collectViaDownstreamBuildAction(accumulated, visitedRunIds);
             } catch (Exception e) {
-                LOGGER.warning("Failed to collect downstream logs via DownstreamBuildAction: " + e.getMessage());
+                LOGGER.log(Level.WARNING,
+                        "Failed to collect downstream logs via DownstreamBuildAction for " + runId, e);
             }
         }
 
@@ -443,7 +446,8 @@ public class PipelineLogExtractor {
         try {
             collectViaUpstreamCause(accumulated, visitedRunIds);
         } catch (Exception e) {
-            LOGGER.warning("Failed to collect downstream logs via UpstreamCause: " + e.getMessage());
+            LOGGER.log(Level.WARNING,
+                    "Failed to collect downstream logs via UpstreamCause for " + runId, e);
         }
     }
 
