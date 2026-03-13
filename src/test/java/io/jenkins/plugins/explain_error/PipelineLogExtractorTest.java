@@ -73,12 +73,6 @@ class PipelineLogExtractorTest {
         when(mockRun.getLog(100)).thenReturn(List.of("Build started", "ERROR: Something failed"));
         when(mockRun.getLogInputStream()).thenReturn(InputStream.nullInputStream());
         when(mockRun.getUrl()).thenReturn("job/test/1/");
-        // Stub getParent()/getNumber() so collectDownstreamLogs() can build the visitedRunIds
-        // key and skip the current job when scanning Jenkins.getAllItems().
-        WorkflowJob mockJob = mock(WorkflowJob.class);
-        when(mockJob.getFullName()).thenReturn("test/mock-job");
-        when(mockRun.getParent()).thenReturn(mockJob);
-        when(mockRun.getNumber()).thenReturn(1);
 
         PipelineLogExtractor extractor = new PipelineLogExtractor(mockRun, 100);
 

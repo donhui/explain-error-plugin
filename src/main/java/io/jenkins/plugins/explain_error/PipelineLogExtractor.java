@@ -417,7 +417,8 @@ public class PipelineLogExtractor {
         try {
             return Pattern.compile(downstreamJobPattern);
         } catch (PatternSyntaxException e) {
-            throw new IllegalArgumentException("Invalid downstream job pattern: " + e.getMessage(), e);
+            LOGGER.log(Level.WARNING, "Invalid downstream job pattern \"{0}\". Downstream logs will not be collected.", downstreamJobPattern);
+            return null;
         }
     }
 
@@ -680,12 +681,44 @@ public class PipelineLogExtractor {
             this.url = subExtractor.getUrl();
         }
 
-        accumulated.addAll(header);
-        accumulated.addAll(subLog);
-        accumulated.add("### END OF DOWNSTREAM JOB: " + jobFullName + " ###");
+        int remainingCapacity = maxLines - accumulated.size();
+        if (remainingCapacity <= 0) {
+            // No room left for this downstream section
+            return;
+        }
 
-        // Recurse into sub-job's own downstream builds
-        subExtractor.collectDownstreamLogs(accumulated, visitedRunIds);
+        // Append header, truncated if needed
+        if (header.size() > remainingCapacity) {
+            accumulated.addAll(header.subList(0, remainingCapacity));
+            // No room left for sub-log or footer
+            return;
+        } else {
+            accumulated.addAll(header);
+            remainingCapacity -= header.size();
+        }
+        // Reserve at least one line for footer if possible
+        final String endMarker = "### END OF DOWNSTREAM JOB: " + jobFullName + " ###";
+        if (remainingCapacity <= 0) {
+            // No space for sub-log or footer
+            return;
+        }
+        int spaceForSubLog = remainingCapacity - 1; // keep one line for footer
+        if (spaceForSubLog > 0) {
+            if (subLog.size() > spaceForSubLog) {
+                accumulated.addAll(subLog.subList(0, spaceForSubLog));
+            } else {
+                accumulated.addAll(subLog);
+            }
+            remainingCapacity = maxLines - accumulated.size();
+        }
+        // Append footer if there is still room
+        if (remainingCapacity > 0) {
+            accumulated.add(endMarker);
+        }
+        // Recurse into sub-job's own downstream builds only if capacity remains
+        if (maxLines - accumulated.size() > 0) {
+            subExtractor.collectDownstreamLogs(accumulated, visitedRunIds);
+        }
     }
 
     private boolean canReadDownstreamRun(Run<?, ?> downstreamRun) {
@@ -695,9 +728,20 @@ public class PipelineLogExtractor {
     }
 
     private void appendHiddenDownstreamPlaceholder(List<String> accumulated) {
-        accumulated.add("### Downstream Job: [hidden] ###");
-        accumulated.add("Result: UNAVAILABLE");
-        accumulated.add("Downstream failure details omitted due to permissions.");
-        accumulated.add("### END OF DOWNSTREAM JOB: [hidden] ###");
+        int remainingCapacity = maxLines - accumulated.size();
+        if (remainingCapacity <= 0) {
+            return;
+        }
+        List<String> placeholderLines = Arrays.asList(
+                "### Downstream Job: [hidden] ###",
+                "Result: UNAVAILABLE",
+                "Downstream failure details omitted due to permissions.",
+                "### END OF DOWNSTREAM JOB: [hidden] ###"
+        );
+        if (placeholderLines.size() <= remainingCapacity) {
+            accumulated.addAll(placeholderLines);
+        } else {
+            accumulated.addAll(placeholderLines.subList(0, remainingCapacity));
+        }
     }
 }
