@@ -587,10 +587,13 @@ public class PipelineLogExtractor {
      */
     private void appendDownstreamRunLog(Run<?, ?> downstreamRun, List<String> accumulated,
                                         Set<String> visitedRunIds) throws IOException {
-        if (downstreamRun.getResult() == null || !downstreamRun.getResult().isWorseThan(Result.SUCCESS)) {
+        Result downstreamResult = downstreamRun.getResult();
+        if (downstreamResult == null || !downstreamResult.isWorseThan(Result.SUCCESS)) {
             return;
         }
-        String runId = downstreamRun.getParent().getFullName() + "#" + downstreamRun.getNumber();
+        String jobFullName = downstreamRun.getParent().getFullName();
+        int buildNumber = downstreamRun.getNumber();
+        String runId = jobFullName + "#" + buildNumber;
         if (!visitedRunIds.add(runId)) {
             return; // already processed
         }
@@ -602,11 +605,10 @@ public class PipelineLogExtractor {
         boolean failFastAborted = isAbortedByFailFast(downstreamRun);
         String resultLabel = failFastAborted
             ? "ABORTED (interrupted by fail-fast, not the root cause)"
-            : String.valueOf(downstreamRun.getResult());
+            : String.valueOf(downstreamResult);
 
         List<String> header = Arrays.asList(
-            "### Downstream Job: " + downstreamRun.getParent().getFullName()
-                + " #" + downstreamRun.getNumber() + " ###",
+            "### Downstream Job: " + jobFullName + " #" + buildNumber + " ###",
             "Result: " + resultLabel,
             "--- LOG CONTENT ---"
         );
@@ -624,7 +626,7 @@ public class PipelineLogExtractor {
             accumulated.addAll(header);
             accumulated.add("[AI explanation from sub-job]");
             accumulated.addAll(Arrays.asList(existingExplanation.getExplanation().split("\n", -1)));
-            accumulated.add("### END OF DOWNSTREAM JOB: " + downstreamRun.getParent().getFullName() + " ###");
+            accumulated.add("### END OF DOWNSTREAM JOB: " + jobFullName + " ###");
             // No need to recurse further — the sub-job's explanation already covers its own
             // downstream failures (it was produced with full context at the time of the failure).
             return;
@@ -648,7 +650,7 @@ public class PipelineLogExtractor {
 
         accumulated.addAll(header);
         accumulated.addAll(subLog);
-        accumulated.add("### END OF DOWNSTREAM JOB: " + downstreamRun.getParent().getFullName() + " ###");
+        accumulated.add("### END OF DOWNSTREAM JOB: " + jobFullName + " ###");
 
         // Recurse into sub-job's own downstream builds
         subExtractor.collectDownstreamLogs(accumulated, visitedRunIds);
