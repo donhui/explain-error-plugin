@@ -631,8 +631,8 @@ class PipelineLogExtractorTest {
 
         // Pre-populate visitedRunIds with the sub-job's ID so it is treated as already seen
         PipelineLogExtractor extractor = new PipelineLogExtractor(parentRun, 500, true, "sub-dedup");
-        // First call getFailedStepLog to initialise url etc., then call collectDownstreamLogs
-        // with a visited set that already contains the sub-job → no downstream section added
+        // Call collectDownstreamLogs with a visited set that already contains both the parent
+        // and the sub-job → no downstream section should be added for the sub-job.
         List<String> accumulated = new ArrayList<>();
         Set<String> visited = new HashSet<>();
         visited.add(parentRun.getParent().getFullName() + "#" + parentRun.getNumber());
