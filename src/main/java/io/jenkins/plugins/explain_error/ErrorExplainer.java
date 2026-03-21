@@ -23,6 +23,7 @@ import org.springframework.security.core.Authentication;
 public class ErrorExplainer {
     static final String DOWNSTREAM_SECTION_START = "### Downstream Job: ";
     static final String DOWNSTREAM_SECTION_END = "### END OF DOWNSTREAM JOB: ";
+    private static final String CONSOLE_PREFIX = "[explain-error] ";
 
     private String providerName;
     private String urlString;
@@ -56,37 +57,54 @@ public class ErrorExplainer {
                         Authentication authentication) {
         String jobInfo = run != null ? ("[" + run.getParent().getFullName() + " #" + run.getNumber() + "]") : "[unknown]";
         try {
+            logToConsole(listener, "Starting explanation for " + jobInfo + ".");
+
             // Check if explanation is enabled (folder-level or global)
             if (!isExplanationEnabled(run)) {
+                logToConsole(listener, "Explanation is disabled by configuration.");
                 listener.getLogger().println("AI error explanation is disabled.");
                 return null;
             }
 
             // Resolve provider (folder-level first, then global)
-            BaseAIProvider provider = resolveProvider(run);
+            ProviderResolution providerResolution = resolveProvider(run);
+            BaseAIProvider provider = providerResolution.provider();
             if (provider == null) {
+                logToConsole(listener, "No AI provider is configured.");
                 listener.getLogger().println("No AI provider configured.");
                 return null;
             }
+            logToConsole(listener, "Explanation is enabled via " + providerResolution.sourceLabel()
+                    + " configuration.");
+            logToConsole(listener, "Using provider " + provider.getProviderName() + ", model " + provider.getModel()
+                    + ".");
 
             // Extract error logs
-            String errorLogs = extractErrorLogs(run, logPattern, maxLines, collectDownstreamLogs,
-                    downstreamJobPattern, authentication);
+            logToConsole(listener, "Extracting failure logs.");
+            PipelineLogExtractor.ExtractionResult extractionResult = extractErrorLogs(run, maxLines,
+                    collectDownstreamLogs, downstreamJobPattern, authentication);
+            String errorLogs = filterErrorLogs(extractionResult.getLogLines(), logPattern);
+            logExtractionSummary(listener, extractionResult, maxLines);
 
             // Use step-level customContext if provided, otherwise fallback to global
             String effectiveCustomContext = StringUtils.isNotBlank(customContext) ? customContext : GlobalConfigurationImpl.get().getCustomContext();
+            logToConsole(listener, "Custom context source: " + resolveCustomContextSource(customContext) + ".");
 
             // Get AI explanation
             try {
+                logToConsole(listener, "Sending AI request.");
                 String explanation = provider.explainError(errorLogs, listener, language, effectiveCustomContext);
                 LOGGER.fine(jobInfo + " AI error explanation succeeded.");
+                logToConsole(listener, "AI request completed successfully.");
 
                 // Store explanation in build action
                 ErrorExplanationAction action = new ErrorExplanationAction(explanation, urlString, errorLogs, provider.getProviderName());
                 run.addOrReplaceAction(action);
-                
+                logToConsole(listener, "Explanation saved to the build.");
+
                 return explanation;
             } catch (ExplanationException ee) {
+                logToConsole(listener, "AI request failed: " + ee.getMessage());
                 listener.getLogger().println(ee.getMessage());
                 return null;
             }
@@ -95,20 +113,22 @@ public class ErrorExplainer {
 
         } catch (IOException e) {
             LOGGER.severe(jobInfo + " Failed to explain error: " + e.getMessage());
+            logToConsole(listener, "Failed to explain error: " + e.getMessage());
             listener.getLogger().println(jobInfo + " Failed to explain error: " + e.getMessage());
             return null;
         }
     }
 
-    private String extractErrorLogs(Run<?, ?> run, String logPattern, int maxLines,
-                                    boolean collectDownstreamLogs, String downstreamJobPattern,
-                                    Authentication authentication) throws IOException {
+    private PipelineLogExtractor.ExtractionResult extractErrorLogs(Run<?, ?> run, int maxLines,
+                                                                   boolean collectDownstreamLogs,
+                                                                   String downstreamJobPattern,
+                                                                   Authentication authentication)
+            throws IOException {
         PipelineLogExtractor logExtractor = new PipelineLogExtractor(run, maxLines, authentication,
                 collectDownstreamLogs, downstreamJobPattern);
-        List<String> logLines =  logExtractor.getFailedStepLog();
-        this.urlString = logExtractor.getUrl();
-
-        return filterErrorLogs(logLines, logPattern);
+        PipelineLogExtractor.ExtractionResult result = logExtractor.extractFailedStepLog();
+        this.urlString = result.getUrl();
+        return result;
     }
 
     String filterErrorLogs(List<String> logLines, String logPattern) {
@@ -157,17 +177,20 @@ public class ErrorExplainer {
             throw new ExplanationException("error", "AI error explanation is disabled.");
         }
         // Resolve provider (folder-level first, then global)
-        BaseAIProvider provider = resolveProvider(run);
+        ProviderResolution providerResolution = resolveProvider(run);
+        BaseAIProvider provider = providerResolution.provider();
         if (provider == null) {
             throw new ExplanationException("error", "No AI provider configured.");
         }
 
         // Get AI explanation with global custom context
-        String explanation = provider.explainError(errorText, new LogTaskListener(LOGGER, Level.FINE), null, GlobalConfigurationImpl.get().getCustomContext());
+        String explanation = provider.explainError(errorText, new LogTaskListener(LOGGER, Level.FINE), null,
+                GlobalConfigurationImpl.get().getCustomContext());
         LOGGER.fine(jobInfo + " AI error explanation succeeded.");
         LOGGER.fine("Explanation length: " + explanation.length());
         this.providerName = provider.getProviderName();
-        ErrorExplanationAction action = new ErrorExplanationAction(explanation, url, errorText, provider.getProviderName());
+        ErrorExplanationAction action = new ErrorExplanationAction(explanation, url, errorText,
+                provider.getProviderName());
         run.addOrReplaceAction(action);
         run.save();
 
@@ -183,15 +206,14 @@ public class ErrorExplainer {
      * @param run the build run to resolve configuration for
      * @return the resolved AI provider, or null if not configured
      */
-    @CheckForNull
-    private BaseAIProvider resolveProvider(@CheckForNull Run<?, ?> run) {
+    private ProviderResolution resolveProvider(@CheckForNull Run<?, ?> run) {
         if (run != null) {
             // Try folder-level configuration first
             BaseAIProvider folderProvider = ExplainErrorFolderProperty.findFolderProvider(run.getParent().getParent());
             if (folderProvider != null) {
                 String jobInfo = "[" + run.getParent().getFullName() + " #" + run.getNumber() + "]";
                 LOGGER.fine(jobInfo + " Using FOLDER-LEVEL AI provider: " + folderProvider.getProviderName() + ", Model: " + folderProvider.getModel());
-                return folderProvider;
+                return new ProviderResolution(folderProvider, "folder");
             }
         }
 
@@ -202,7 +224,7 @@ public class ErrorExplainer {
             String jobInfo = run != null ? ("[" + run.getParent().getFullName() + " #" + run.getNumber() + "]") : "[unknown]";
             LOGGER.fine(jobInfo + " Using GLOBAL AI provider: " + globalProvider.getProviderName() + ", Model: " + globalProvider.getModel());
         }
-        return globalProvider;
+        return new ProviderResolution(globalProvider, "global");
     }
 
     /**
@@ -274,5 +296,44 @@ public class ErrorExplainer {
         }
 
         return null;
+    }
+
+    private void logToConsole(TaskListener listener, String message) {
+        listener.getLogger().println(CONSOLE_PREFIX + message);
+    }
+
+    private void logExtractionSummary(TaskListener listener, PipelineLogExtractor.ExtractionResult result,
+                                      int maxLines) {
+        if (result.isFallbackToBuildLog()) {
+            logToConsole(listener, "No failing step log found; using the last " + maxLines + " console lines.");
+        } else if (result.isFoundFailingNode()) {
+            logToConsole(listener, "Extracted " + result.getExtractedLineCount() + " log lines from failing node "
+                    + result.getPrimaryNodeId() + ".");
+        } else {
+            logToConsole(listener, "Extracted " + result.getExtractedLineCount() + " log lines.");
+        }
+
+        if (!result.isDownstreamCollectionEnabled()) {
+            logToConsole(listener, "Downstream log collection disabled.");
+            return;
+        }
+
+        logToConsole(listener, "Downstream log collection enabled; matched "
+                + result.getDownstreamMatchedCount() + " builds, reused "
+                + result.getDownstreamReusedExplanationCount() + " existing explanations, skipped "
+                + result.getDownstreamPermissionSkippedCount() + " due to permissions.");
+    }
+
+    private String resolveCustomContextSource(String stepCustomContext) {
+        if (StringUtils.isNotBlank(stepCustomContext)) {
+            return "step";
+        }
+        if (StringUtils.isNotBlank(GlobalConfigurationImpl.get().getCustomContext())) {
+            return "global";
+        }
+        return "none";
+    }
+
+    private record ProviderResolution(@CheckForNull BaseAIProvider provider, String sourceLabel) {
     }
 }
