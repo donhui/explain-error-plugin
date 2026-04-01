@@ -783,7 +783,7 @@ public class PipelineLogExtractor {
                 authentication, collectDownstreamLogs, downstreamJobPattern, stats);
         ExtractionResult subResult = subExtractor.extractFailedStepLog(false);
         List<String> subLog = subResult.getLogLines();
-        if (subLog == null || subLog.isEmpty()) {
+        if (subLog.isEmpty()) {
             return;
         }
 
