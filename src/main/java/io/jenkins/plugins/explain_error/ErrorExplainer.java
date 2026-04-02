@@ -62,7 +62,6 @@ public class ErrorExplainer {
             // Check if explanation is enabled (folder-level or global)
             if (!isExplanationEnabled(run)) {
                 logToConsole(listener, "Explanation is disabled by configuration.");
-                listener.getLogger().println("AI error explanation is disabled.");
                 return null;
             }
 
@@ -71,7 +70,6 @@ public class ErrorExplainer {
             BaseAIProvider provider = providerResolution.provider();
             if (provider == null) {
                 logToConsole(listener, "No AI provider is configured.");
-                listener.getLogger().println("No AI provider configured.");
                 return null;
             }
             logToConsole(listener, "Explanation is enabled via " + providerResolution.sourceLabel()
@@ -105,7 +103,6 @@ public class ErrorExplainer {
                 return explanation;
             } catch (ExplanationException ee) {
                 logToConsole(listener, "AI request failed: " + ee.getMessage());
-                listener.getLogger().println(ee.getMessage());
                 return null;
             }
 
@@ -114,7 +111,6 @@ public class ErrorExplainer {
         } catch (IOException e) {
             LOGGER.severe(jobInfo + " Failed to explain error: " + e.getMessage());
             logToConsole(listener, "Failed to explain error: " + e.getMessage());
-            listener.getLogger().println(jobInfo + " Failed to explain error: " + e.getMessage());
             return null;
         }
     }

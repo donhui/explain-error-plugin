@@ -103,7 +103,6 @@ class ExplainErrorStepTest {
 
         jenkins.assertLogContains("[explain-error] Starting explanation", run);
         jenkins.assertLogContains("[explain-error] Explanation is disabled by configuration.", run);
-        jenkins.assertLogContains("AI error explanation is disabled.", run);
     }
 
 }
