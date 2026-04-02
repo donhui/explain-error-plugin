@@ -303,15 +303,13 @@ public class ErrorExplainer {
         if (result.fallbackToBuildLog()) {
             logToConsole(listener, "No failing step log found; using the last " + maxLines + " console lines.");
         } else if (result.foundFailingNode()) {
-            logToConsole(listener,
-                    "Extracted " + result.getExtractedLineCount() + " log lines from primary node "
-                            + result.primaryNodeId() + " selected for failing step context.");
+            logToConsole(listener, "Extracted " + result.getExtractedLineCount() + " log lines from the failing step.");
         } else {
             logToConsole(listener, "Extracted " + result.getExtractedLineCount() + " log lines.");
         }
 
         if (!result.downstreamCollectionEnabled()) {
-            logToConsole(listener, "Downstream log collection not performed (disabled by configuration or invalid/blank downstreamJobPattern).");
+            logToConsole(listener, "Downstream log collection is disabled.");
             return;
         }
 
