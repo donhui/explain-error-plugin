@@ -33,6 +33,9 @@ class ExplainErrorStepTest {
         WorkflowRun run = jenkins.assertBuildStatus(hudson.model.Result.SUCCESS, job.scheduleBuild2(0));
 
         // Check that the explain error step was called and logged the expected error
+        jenkins.assertLogContains("[explain-error] Starting explanation", run);
+        jenkins.assertLogContains("[explain-error] Using provider OpenAI", run);
+        jenkins.assertLogContains("[explain-error] AI request failed: The provider is not properly configured.", run);
         jenkins.assertLogContains("The provider is not properly configured.", run);
     }
 
@@ -55,6 +58,10 @@ class ExplainErrorStepTest {
         WorkflowRun run = jenkins.assertBuildStatus(hudson.model.Result.SUCCESS, job.scheduleBuild2(0));
         ErrorExplanationAction action = run.getAction(ErrorExplanationAction.class);
         assertNotNull(action);
+        jenkins.assertLogContains("[explain-error] Starting explanation", run);
+        jenkins.assertLogContains("[explain-error] Using provider Test, model test-model.", run);
+        jenkins.assertLogContains("[explain-error] AI request completed successfully.", run);
+        jenkins.assertLogContains("[explain-error] Explanation saved to the build.", run);
     }
 
     @Test
@@ -79,6 +86,23 @@ class ExplainErrorStepTest {
         
         ErrorExplanationAction action = run.getAction(ErrorExplanationAction.class);
         assertNotNull(action);
+    }
+
+    @Test
+    void testExplainErrorStepDisabled(JenkinsRule jenkins) throws Exception {
+        GlobalConfigurationImpl config = GlobalConfigurationImpl.get();
+        config.setEnableExplanation(false);
+        config.setAiProvider(new TestProvider());
+
+        WorkflowJob job = jenkins.createProject(WorkflowJob.class, "test-explain-error-disabled");
+        job.setDefinition(new CpsFlowDefinition("node {\n"
+                + "    explainError()\n"
+                + "}", true));
+
+        WorkflowRun run = jenkins.assertBuildStatus(hudson.model.Result.SUCCESS, job.scheduleBuild2(0));
+
+        jenkins.assertLogContains("[explain-error] Starting explanation", run);
+        jenkins.assertLogContains("[explain-error] Explanation is disabled by configuration.", run);
     }
 
 }
