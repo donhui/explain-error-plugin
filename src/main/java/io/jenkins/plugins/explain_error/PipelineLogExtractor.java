@@ -1,6 +1,7 @@
 package io.jenkins.plugins.explain_error;
 
 import com.google.common.annotations.VisibleForTesting;
+import edu.umd.cs.findbugs.annotations.CheckForNull;
 import hudson.model.Item;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 
@@ -90,69 +91,23 @@ public class PipelineLogExtractor {
     private final Authentication authentication;
     private final ExtractionStats stats;
 
-    public static final class ExtractionResult {
-        private final List<String> logLines;
-        private final String url;
-        private final boolean fallbackToBuildLog;
-        private final boolean foundFailingNode;
-        private final String primaryNodeId;
-        private final boolean downstreamCollectionEnabled;
-        private final int downstreamMatchedCount;
-        private final int downstreamReusedExplanationCount;
-        private final int downstreamPermissionSkippedCount;
+    public record ExtractionResult(
+            List<String> logLines,
+            @CheckForNull String url,
+            boolean fallbackToBuildLog,
+            boolean foundFailingNode,
+            @CheckForNull String primaryNodeId,
+            boolean downstreamCollectionEnabled,
+            int downstreamMatchedCount,
+            int downstreamReusedExplanationCount,
+            int downstreamPermissionSkippedCount) {
 
-        ExtractionResult(List<String> logLines, String url, boolean fallbackToBuildLog, boolean foundFailingNode,
-                         String primaryNodeId, boolean downstreamCollectionEnabled, int downstreamMatchedCount,
-                         int downstreamReusedExplanationCount, int downstreamPermissionSkippedCount) {
-            this.logLines = List.copyOf(logLines);
-            this.url = url;
-            this.fallbackToBuildLog = fallbackToBuildLog;
-            this.foundFailingNode = foundFailingNode;
-            this.primaryNodeId = primaryNodeId;
-            this.downstreamCollectionEnabled = downstreamCollectionEnabled;
-            this.downstreamMatchedCount = downstreamMatchedCount;
-            this.downstreamReusedExplanationCount = downstreamReusedExplanationCount;
-            this.downstreamPermissionSkippedCount = downstreamPermissionSkippedCount;
-        }
-
-        public List<String> getLogLines() {
-            return logLines;
-        }
-
-        public String getUrl() {
-            return url;
-        }
-
-        public boolean isFallbackToBuildLog() {
-            return fallbackToBuildLog;
-        }
-
-        public boolean isFoundFailingNode() {
-            return foundFailingNode;
-        }
-
-        public String getPrimaryNodeId() {
-            return primaryNodeId;
+        public ExtractionResult {
+            logLines = List.copyOf(logLines);
         }
 
         public int getExtractedLineCount() {
             return logLines.size();
-        }
-
-        public boolean isDownstreamCollectionEnabled() {
-            return downstreamCollectionEnabled;
-        }
-
-        public int getDownstreamMatchedCount() {
-            return downstreamMatchedCount;
-        }
-
-        public int getDownstreamReusedExplanationCount() {
-            return downstreamReusedExplanationCount;
-        }
-
-        public int getDownstreamPermissionSkippedCount() {
-            return downstreamPermissionSkippedCount;
         }
     }
 
@@ -327,7 +282,7 @@ public class PipelineLogExtractor {
      * @throws IOException if there is an error reading the build logs.
      */
     public List<String> getFailedStepLog() throws IOException {
-        return extractFailedStepLog().getLogLines();
+        return extractFailedStepLog().logLines();
     }
 
     public ExtractionResult extractFailedStepLog() throws IOException {
@@ -782,7 +737,7 @@ public class PipelineLogExtractor {
         PipelineLogExtractor subExtractor = new PipelineLogExtractor(downstreamRun, remaining, downstreamDepth + 1,
                 authentication, collectDownstreamLogs, downstreamJobPattern, stats);
         ExtractionResult subResult = subExtractor.extractFailedStepLog(false);
-        List<String> subLog = subResult.getLogLines();
+        List<String> subLog = subResult.logLines();
         if (subLog.isEmpty()) {
             return;
         }
@@ -790,9 +745,9 @@ public class PipelineLogExtractor {
         // If this sub-job genuinely failed (not just aborted by fail-fast) and the parent
         // URL still points to the parent job (i.e. no prior real sub-job failure has already
         // claimed the URL), redirect "View failure output" to the sub-job's failing node.
-        if (!failFastAborted && subResult.getUrl() != null && this.url != null
+        if (!failFastAborted && subResult.url() != null && this.url != null
                 && runUrl != null && this.url.contains(runUrl)) {
-            this.url = subResult.getUrl();
+            this.url = subResult.url();
         }
 
         int remainingCapacity = maxLines - accumulated.size();

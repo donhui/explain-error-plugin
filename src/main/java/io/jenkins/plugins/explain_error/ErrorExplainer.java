@@ -81,7 +81,7 @@ public class ErrorExplainer {
             logToConsole(listener, "Extracting failure logs.");
             PipelineLogExtractor.ExtractionResult extractionResult = extractErrorLogs(run, maxLines,
                     collectDownstreamLogs, downstreamJobPattern, authentication);
-            String errorLogs = filterErrorLogs(extractionResult.getLogLines(), logPattern);
+            String errorLogs = filterErrorLogs(extractionResult.logLines(), logPattern);
             logExtractionSummary(listener, extractionResult, maxLines);
 
             // Use step-level customContext if provided, otherwise fallback to global
@@ -123,7 +123,7 @@ public class ErrorExplainer {
         PipelineLogExtractor logExtractor = new PipelineLogExtractor(run, maxLines, authentication,
                 collectDownstreamLogs, downstreamJobPattern);
         PipelineLogExtractor.ExtractionResult result = logExtractor.extractFailedStepLog();
-        this.urlString = result.getUrl();
+        this.urlString = result.url();
         return result;
     }
 
@@ -300,25 +300,25 @@ public class ErrorExplainer {
 
     private void logExtractionSummary(TaskListener listener, PipelineLogExtractor.ExtractionResult result,
                                       int maxLines) {
-        if (result.isFallbackToBuildLog()) {
+        if (result.fallbackToBuildLog()) {
             logToConsole(listener, "No failing step log found; using the last " + maxLines + " console lines.");
-        } else if (result.isFoundFailingNode()) {
+        } else if (result.foundFailingNode()) {
             logToConsole(listener,
                     "Extracted " + result.getExtractedLineCount() + " log lines from primary node "
-                            + result.getPrimaryNodeId() + " selected for failing step context.");
+                            + result.primaryNodeId() + " selected for failing step context.");
         } else {
             logToConsole(listener, "Extracted " + result.getExtractedLineCount() + " log lines.");
         }
 
-        if (!result.isDownstreamCollectionEnabled()) {
+        if (!result.downstreamCollectionEnabled()) {
             logToConsole(listener, "Downstream log collection not performed (disabled by configuration or invalid/blank downstreamJobPattern).");
             return;
         }
 
         logToConsole(listener, "Downstream log collection enabled; matched "
-                + result.getDownstreamMatchedCount() + " builds, reused "
-                + result.getDownstreamReusedExplanationCount() + " existing explanations, skipped "
-                + result.getDownstreamPermissionSkippedCount() + " due to permissions.");
+                + result.downstreamMatchedCount() + " builds, reused "
+                + result.downstreamReusedExplanationCount() + " existing explanations, skipped "
+                + result.downstreamPermissionSkippedCount() + " due to permissions.");
     }
 
     private String resolveCustomContextSource(String stepCustomContext) {

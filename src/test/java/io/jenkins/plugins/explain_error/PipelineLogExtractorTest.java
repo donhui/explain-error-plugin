@@ -78,19 +78,19 @@ class PipelineLogExtractorTest {
 
         // Should not throw NullPointerException
         PipelineLogExtractor.ExtractionResult result = assertDoesNotThrow(extractor::extractFailedStepLog);
-        List<String> logLines = result.getLogLines();
+        List<String> logLines = result.logLines();
 
         // Should fall back to build log
         assertNotNull(logLines);
         assertEquals(2, logLines.size());
         assertEquals("ERROR: Something failed", logLines.get(1));
 
-        assertTrue(result.isFallbackToBuildLog(), "Expected fallback metadata to be set");
-        assertFalse(result.isFoundFailingNode(),
+        assertTrue(result.fallbackToBuildLog(), "Expected fallback metadata to be set");
+        assertFalse(result.foundFailingNode(),
                 "Mock run without flow execution should not report a failing node");
 
         // URL should be set (either console or stages depending on plugin availability)
-        String url = result.getUrl();
+        String url = result.url();
         assertNotNull(url, "URL should not be null after getFailedStepLog()");
         assertTrue(url.contains("job/test/1/"), "URL should reference the build");
     }
@@ -544,7 +544,7 @@ class PipelineLogExtractorTest {
 
         PipelineLogExtractor extractor = new PipelineLogExtractor(parentRun, 500, true, "sub-job-failure");
         PipelineLogExtractor.ExtractionResult result = extractor.extractFailedStepLog();
-        List<String> lines = result.getLogLines();
+        List<String> lines = result.logLines();
         String log = String.join("\n", lines);
 
         assertTrue(log.contains("### Downstream Job: sub-job-failure"),
@@ -553,9 +553,9 @@ class PipelineLogExtractorTest {
                 "Downstream section must be labelled Result: FAILURE.\nActual log:\n" + log);
         assertTrue(log.contains("SUB_JOB_ERROR_MARKER"),
                 "Downstream section must include the sub-job's error output.\nActual log:\n" + log);
-        assertTrue(result.isDownstreamCollectionEnabled(), "Downstream collection should be enabled");
-        assertEquals(1, result.getDownstreamMatchedCount(), "Expected one downstream build to be matched");
-        assertEquals(0, result.getDownstreamReusedExplanationCount(),
+        assertTrue(result.downstreamCollectionEnabled(), "Downstream collection should be enabled");
+        assertEquals(1, result.downstreamMatchedCount(), "Expected one downstream build to be matched");
+        assertEquals(0, result.downstreamReusedExplanationCount(),
                 "Expected raw log extraction instead of explanation reuse");
     }
 
@@ -732,7 +732,7 @@ class PipelineLogExtractorTest {
         // Now extract logs from the parent — the fast path should kick in
         PipelineLogExtractor extractor = new PipelineLogExtractor(parentRun, 500, true, "sub-with-explanation");
         PipelineLogExtractor.ExtractionResult result = extractor.extractFailedStepLog();
-        List<String> lines = result.getLogLines();
+        List<String> lines = result.logLines();
         String log = String.join("\n", lines);
 
         // The pre-computed explanation must appear
@@ -743,8 +743,8 @@ class PipelineLogExtractorTest {
         // Raw log lines from the sub-job's sh step must NOT be extracted again
         assertFalse(log.contains("RAW_SUB_LOG_SHOULD_NOT_APPEAR"),
                 "Raw sub-job log lines must not appear when explanation is reused.\nActual log:\n" + log);
-        assertEquals(1, result.getDownstreamMatchedCount(), "Expected one downstream build to be matched");
-        assertEquals(1, result.getDownstreamReusedExplanationCount(),
+        assertEquals(1, result.downstreamMatchedCount(), "Expected one downstream build to be matched");
+        assertEquals(1, result.downstreamReusedExplanationCount(),
                 "Expected the downstream explanation to be reused");
     }
 
@@ -834,8 +834,8 @@ class PipelineLogExtractorTest {
             PipelineLogExtractor extractor = new PipelineLogExtractor(parentRun, 500, viewer, true,
                     "hidden-build-step-sub");
             PipelineLogExtractor.ExtractionResult result = extractor.extractFailedStepLog();
-            log = String.join("\n", result.getLogLines());
-            assertEquals(1, result.getDownstreamPermissionSkippedCount(),
+            log = String.join("\n", result.logLines());
+            assertEquals(1, result.downstreamPermissionSkippedCount(),
                     "Expected one downstream build to be skipped due to permissions");
         }
 
