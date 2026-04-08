@@ -48,10 +48,11 @@ public class GlobalConfigurationImpl extends GlobalConfiguration {
                     case GEMINI -> new GeminiProvider(apiUrl, model, apiKey);
                     case OLLAMA -> new OllamaProvider(apiUrl, model);
                 };
+                provider = null;
+                save();
             } else {
                 aiProvider = new OpenAIProvider(null, OpenAIProvider.DEFAULT_MODEL, null);
             }
-            save();
         }
         return this;
     }
