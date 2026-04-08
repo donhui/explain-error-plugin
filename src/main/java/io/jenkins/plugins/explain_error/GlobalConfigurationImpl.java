@@ -41,13 +41,18 @@ public class GlobalConfigurationImpl extends GlobalConfiguration {
     }
 
     public Object readResolve() {
-        if (aiProvider == null && provider != null) {
-            aiProvider = switch (provider) {
-                case OPENAI -> new OpenAIProvider(apiUrl, model, apiKey);
-                case GEMINI -> new GeminiProvider(apiUrl, model, apiKey);
-                case OLLAMA -> new OllamaProvider(apiUrl, model);
-            };
-            save();
+        if (aiProvider == null) {
+            if (provider != null) {
+                aiProvider = switch (provider) {
+                    case OPENAI -> new OpenAIProvider(apiUrl, model, apiKey);
+                    case GEMINI -> new GeminiProvider(apiUrl, model, apiKey);
+                    case OLLAMA -> new OllamaProvider(apiUrl, model);
+                };
+                provider = null;
+                save();
+            } else {
+                aiProvider = new OpenAIProvider(null, OpenAIProvider.DEFAULT_MODEL, null);
+            }
         }
         return this;
     }
